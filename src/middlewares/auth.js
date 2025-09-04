@@ -1,25 +1,19 @@
 import passport from 'passport';
 
-// Wrapper para invocar estrategias Passport sin sesiones
-export const usarPassport = (estrategia) => (req, res, next) => {
-    passport.authenticate(estrategia, { session: false }, (err, user, info) => {
-        if (err) return next(err);
-        if (!user) {
-            const mensaje = info?.message || 'No autorizado';
-            return res.status(401).json({ status: 'error', error: mensaje });
-        }
-        req.user = user;
-        next();
-    })(req, res, next);
-};
+// Middleware que requiere un usuario autenticado mediante la estrategia 'current' (JWT)
+export const requiereUsuario = passport.authenticate('current', { session: false });
 
-// Políticas por rol
-export const requiereRoles = (rolesPermitidos = []) => {
-    return (req, res, next) => {
-        const rol = req.user?.role;
-        if (!rolesPermitidos.includes(rol)) {
-            return res.status(403).json({ status: 'error', error: 'Prohibido' });
-        }
-        next();
-    };
-};
+// Middleware que valida que el usuario tenga alguno de los roles permitidos
+export function requiereRol(...rolesPermitidos) {
+  return (req, res, next) => {
+    const rol = req.user?.role;
+
+    // Si no hay rol o no esta en la lista de permitidos, devuelve 403
+    if (!rol || !rolesPermitidos.includes(rol)) {
+      return res.status(403).json({ status: 'error', mensaje: 'No autorizado' });
+    }
+
+    // Si el rol es valido, continua
+    next();
+  };
+}

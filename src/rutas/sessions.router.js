@@ -1,106 +1,70 @@
+// src/rutas/sessions.router.js
 import { Router } from 'express';
-import bcrypt from 'bcrypt';
-import { UsuarioModelo } from '../modelos/usuario.model.js';
-import { CarritoModelo } from '../modelos/carrito.model.js';
-import { generarToken } from '../utils/jwt.js';
-import { usarPassport } from '../middlewares/auth.js';
+import passport from 'passport';
+import {
+  iniciarSesion,
+  usuarioActual,
+  cerrarSesion,
+  solicitarResetPassword,
+  resetPassword,
+} from '../controladores/sesiones.controlador.js';
+import { requiereUsuario } from '../middlewares/auth.js';
 
-export const sessionsRouter = Router();
+const router = Router();
 
-/**
- * POST /api/sessions/register
- * Crea usuario (pass hasheada) y carrito vacío
- */
-sessionsRouter.post('/register', async (req, res, next) => {
-    try {
-        const { first_name, last_name, email, age, password, role } = req.body;
+/* Login (JWT -> cookie) */
+router.post('/login', passport.authenticate('login', { session: false }), iniciarSesion);
 
-        if (!first_name || !last_name || !email || !password || typeof age !== 'number') {
-            return res.status(400).json({ status: 'error', error: 'Faltan campos requeridos' });
-        }
+/* Usuario actual (DTO, sin datos sensibles) */
+router.get('/current', requiereUsuario, usuarioActual);
 
-        const existe = await UsuarioModelo.findOne({ email });
-        if (existe) {
-            return res.status(400).json({ status: 'error', error: 'Email ya registrado' });
-        }
+/* Logout (limpia cookie) */
+router.post('/logout', cerrarSesion);
 
-        const salt = bcrypt.genSaltSync(10);
-        const hash = bcrypt.hashSync(password, salt);
+/* Forgot password (envía mail con link 1h) */
+router.post('/forgot-password', solicitarResetPassword);
 
-        const carrito = await CarritoModelo.create({ productos: [] });
+/* Reset password (GET) -> formulario mínimo que POSTea al endpoint real */
+router.get('/reset-password', (req, res) => {
+  const { token } = req.query;
+  if (!token) return res.status(400).send('Falta token');
 
-        const nuevo = await UsuarioModelo.create({
-            first_name,
-            last_name,
-            email,
-            age,
-            password: hash,
-            cart: carrito._id,
-            role: role || 'user'
-        });
-
-        return res.status(201).json({ status: 'success', payload: { uid: nuevo._id } });
-    } catch (err) {
-        next(err);
-    }
+  // HTML inline, sin recursos externos (evita CSP). Usa urlencoded (app ya tiene express.urlencoded()).
+  res.type('html').send(`<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Restablecer contraseña</title>
+  <style>
+    :root { --bg:#f6f7fb; --card:#fff; --txt:#111827; --muted:#6b7280; --bd:#e5e7eb; --btn:#2563eb; --btnh:#1e40af; }
+    body { margin:0; font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; background:var(--bg); }
+    .box { max-width:420px; margin:8vh auto; background:var(--card); padding:24px; border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,.08); border:1px solid var(--bd); }
+    h1 { margin:0 0 10px; font-size:20px; color:var(--txt); }
+    p { margin:0 0 14px; color:var(--muted); }
+    label { display:block; font-weight:600; margin:14px 0 6px; color:var(--txt); }
+    input[type=password] { width:100%; padding:10px 12px; border:1px solid var(--bd); border-radius:8px; font-size:14px; }
+    button { width:100%; margin-top:16px; padding:12px; border:0; border-radius:10px; font-weight:700; color:#fff; background:var(--btn); cursor:pointer; }
+    button:hover { background:var(--btnh); }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>Restablecer contraseña</h1>
+    <p>Ingresá tu nueva contraseña. El enlace vence en 1 hora.</p>
+    <form method="POST" action="/api/sessions/reset-password" autocomplete="off">
+      <input type="hidden" name="token" value="${token}" />
+      <label for="pwd">Nueva contraseña</label>
+      <input id="pwd" name="nuevaPassword" type="password" minlength="6" required />
+      <button type="submit">Cambiar contraseña</button>
+    </form>
+    <p style="margin-top:10px">Si el enlace venció, solicitá uno nuevo.</p>
+  </div>
+</body>
+</html>`);
 });
 
-// Login (manual) + JWT — fuerza traer password si el schema lo tiene select:false
-sessionsRouter.post('/login', async (req, res, next) => {
-  try {
-    const { email, password } = req.body;
-    if (!email || !password)
-      return res.status(400).json({ status: 'error', error: 'Faltan email o password' });
+/* Reset password (POST) -> aplica cambio */
+router.post('/reset-password', resetPassword);
 
-    // ¡OJO!: .select('+password') para que venga el hash
-    const usuario = await UsuarioModelo.findOne({ email }).select('+password');
-    if (!usuario)
-      return res.status(401).json({ status: 'error', error: 'Credenciales inválidas' });
-
-    const hash = usuario.password || '';
-    const ok = typeof hash === 'string' && hash.startsWith('$2') && bcrypt.compareSync(password, hash);
-    if (!ok)
-      return res.status(401).json({ status: 'error', error: 'Credenciales inválidas' });
-
-    const token = generarToken({
-      uid: usuario._id.toString(),
-      role: usuario.role,
-      email: usuario.email
-    });
-
-    return res.json({ status: 'success', token });
-  } catch (e) {
-    console.error('Error en /login:', e);
-    return res.status(500).json({ status: 'error', error: 'No se pudo iniciar sesión' });
-  }
-});
-/**
- * GET /api/sessions/current
- * Valida JWT y devuelve el usuario asociado
- * Nota: la estrategia 'jwt' ya coloca el documento de usuario en req.user
- */
-sessionsRouter.get('/current', usarPassport('jwt'), async (req, res, next) => {
-    try {
-        const u = req.user; // viene desde la estrategia JWT (UsuarioModelo poblado si así se configuró)
-        if (!u) {
-            return res.status(401).json({ status: 'error', error: 'No autorizado' });
-        }
-
-        return res.json({
-            status: 'success',
-            user: {
-                id: u._id,
-                first_name: u.first_name,
-                last_name: u.last_name,
-                email: u.email,
-                age: u.age,
-                role: u.role,
-                cart: u.cart
-            }
-        });
-    } catch (err) {
-        next(err);
-    }
-});
-
-export default sessionsRouter;
+export default router;

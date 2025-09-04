@@ -1,4 +1,4 @@
-import jwt from 'jsonwebtoken';
+/* import jwt from 'jsonwebtoken';
 import { config } from '../config/config.js';
 
 // Toma el secreto y el expires de cualquiera de las dos formas de config
@@ -23,3 +23,21 @@ export const extraerTokenDeHeaders = (req) => {
   if (req.cookies?.token) return req.cookies.token;
   return null;
 };
+*/
+
+import jwt from 'jsonwebtoken';
+import { config } from '../config/config.js';
+
+export function generarToken(payloadMinimo) {
+  return jwt.sign(payloadMinimo, config.jwtSecret, { expiresIn: config.jwtExpiresIn });
+}
+
+export function extraerToken(req) {
+  const cookieToken = req.cookies?.[config.jwtCookieName];
+  if (cookieToken) return cookieToken;
+
+  const auth = req.headers['authorization'];
+  if (auth && auth.startsWith('Bearer ')) return auth.substring(7);
+
+  return null;
+}

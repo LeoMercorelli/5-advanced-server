@@ -1,89 +1,108 @@
 import { Router } from 'express';
 import { UsuarioModelo } from '../modelos/usuario.model.js';
-import { usarPassport, requiereRoles } from '../middlewares/auth.js';
-import bcrypt from 'bcrypt';
+import { requiereUsuario, requiereRol } from '../middlewares/auth.js';
+import { hashPassword } from '../utils/criptografia.js';
 
 export const usuariosRouter = Router();
 
-// PROTEGEMOS todas estas rutas con JWT.
-// Y solo 'admin' puede listar/crear/editar/eliminar a gusto.
-// Podés ajustar políticas a tu gusto según el TP.
+// Todas las rutas de usuarios quedan protegidas: requiere login y rol admin
+usuariosRouter.use(requiereUsuario, requiereRol('admin'));
 
-usuariosRouter.use(usarPassport('jwt'), requiereRoles(['admin']));
-
-// CREATE
+// CREATE - Crea un nuevo usuario
 usuariosRouter.post('/', async (req, res, next) => {
-    try {
-        const { first_name, last_name, email, age, password, cart, role } = req.body;
-        if (!password) return res.status(400).json({ status: 'error', error: 'password requerida' });
+  try {
+    const { first_name, last_name, email, age, password, cart, role } = req.body;
 
-        const salt = bcrypt.genSaltSync(10);
-        const hash = bcrypt.hashSync(password, salt);
-
-        const creado = await UsuarioModelo.create({
-            first_name,
-            last_name,
-            email,
-            age,
-            password: hash,
-            cart,
-            role: role || 'user'
-        });
-
-        res.status(201).json({ status: 'success', payload: creado });
-    } catch (err) {
-        next(err);
+    // Validacion de campos obligatorios
+    if (!first_name || !last_name || !email || age == null || !password) {
+      return res.status(400).json({ status: 'error', error: 'Datos obligatorios faltantes' });
     }
+
+    // Evita duplicados por email
+    const yaExiste = await UsuarioModelo.findOne({ email }).lean();
+    if (yaExiste) return res.status(409).json({ status: 'error', error: 'Email ya registrado' });
+
+    // Creacion del usuario con password hasheada
+    const creado = await UsuarioModelo.create({
+      first_name,
+      last_name,
+      email,
+      age,
+      password: hashPassword(password),
+      cart: cart ?? null,
+      role: role ?? 'user',
+    });
+
+    // Elimina el password antes de responder
+    const limpio = creado.toObject();
+    delete limpio.password;
+
+    res.status(201).json({ status: 'success', payload: limpio });
+  } catch (err) {
+    // Maneja error de duplicado por indice unico
+    if (err?.code === 11000) {
+      return res.status(409).json({ status: 'error', error: 'Email ya registrado' });
+    }
+    next(err);
+  }
 });
 
-// READ (lista)
-usuariosRouter.get('/', async (req, res, next) => {
-    try {
-        const usuarios = await UsuarioModelo.find().populate('cart');
-        res.json({ status: 'success', payload: usuarios });
-    } catch (err) {
-        next(err);
-    }
+// READ - Lista todos los usuarios (sin password, con cart populado)
+usuariosRouter.get('/', async (_req, res, next) => {
+  try {
+    const usuarios = await UsuarioModelo.find().select('-password').populate('cart');
+    res.json({ status: 'success', payload: usuarios });
+  } catch (err) {
+    next(err);
+  }
 });
 
-// READ (detalle)
+// READ - Obtiene detalle de un usuario por id
 usuariosRouter.get('/:id', async (req, res, next) => {
-    try {
-        const u = await UsuarioModelo.findById(req.params.id).populate('cart');
-        if (!u) return res.status(404).json({ status: 'error', error: 'No encontrado' });
-        res.json({ status: 'success', payload: u });
-    } catch (err) {
-        next(err);
-    }
+  try {
+    const u = await UsuarioModelo.findById(req.params.id).select('-password').populate('cart');
+    if (!u) return res.status(404).json({ status: 'error', error: 'No encontrado' });
+    res.json({ status: 'success', payload: u });
+  } catch (err) {
+    next(err);
+  }
 });
 
-// UPDATE
+// UPDATE - Actualiza datos de un usuario
 usuariosRouter.put('/:id', async (req, res, next) => {
-    try {
-        const datos = { ...req.body };
-        // si envían password, re-hashear
-        if (datos.password) {
-            const salt = bcrypt.genSaltSync(10);
-            datos.password = bcrypt.hashSync(datos.password, salt);
-        }
-        const actualizado = await UsuarioModelo.findByIdAndUpdate(req.params.id, datos, {
-            new: true,
-            runValidators: true
-        });
-        if (!actualizado) return res.status(404).json({ status: 'error', error: 'No encontrado' });
-        res.json({ status: 'success', payload: actualizado });
-    } catch (err) {
-        next(err);
+  try {
+    const datos = { ...req.body };
+
+    // Si envian password, se rehashea; si no, se omite
+    if (typeof datos.password === 'string' && datos.password.trim() !== '') {
+      datos.password = hashPassword(datos.password);
+    } else {
+      delete datos.password;
     }
+
+    const actualizado = await UsuarioModelo
+      .findByIdAndUpdate(req.params.id, datos, { new: true, runValidators: true })
+      .select('-password')
+      .populate('cart');
+
+    if (!actualizado) return res.status(404).json({ status: 'error', error: 'No encontrado' });
+    res.json({ status: 'success', payload: actualizado });
+  } catch (err) {
+    // Maneja duplicados de email en update
+    if (err?.code === 11000) {
+      return res.status(409).json({ status: 'error', error: 'Email ya registrado' });
+    }
+    next(err);
+  }
 });
 
-// DELETE
+// DELETE - Elimina un usuario por id
 usuariosRouter.delete('/:id', async (req, res, next) => {
-    try {
-        const borrado = await UsuarioModelo.findByIdAndDelete(req.params.id);
-        if (!borrado) return res.status(404).json({ status: 'error', error: 'No encontrado' });
-        res.json({ status: 'success', payload: borrado._id });
-    } catch (err) {
-        next(err);
-    }
+  try {
+    const borrado = await UsuarioModelo.findByIdAndDelete(req.params.id);
+    if (!borrado) return res.status(404).json({ status: 'error', error: 'No encontrado' });
+    res.json({ status: 'success', payload: borrado._id });
+  } catch (err) {
+    next(err);
+  }
 });
